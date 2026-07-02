@@ -130,14 +130,21 @@ You will see the Resource Group appear in your list in a few seconds.
    - **Resource group:** `c2-infra-rg`
    - **Name:** `c2-vnet`
    - **Region:** same region you chose above
-4. **IP Addresses tab:**
-   - Azure will suggest an address space like `10.0.0.0/16`. That is fine. Leave it.
-   - Under **Subnets**, you will see a default subnet. Click on it to edit it.
-   - Change the subnet name to `c2-subnet`
-   - Address range: `10.0.0.0/24`
-   - Click **Save**
+4. **Address space tab:**
+   - Azure will suggest a virtual network address space of `10.0.0.0/16`. That is fine. Leave it.
+   - Under the **Subnets** list, you will see a subnet named `default` with address range `10.0.0.0 - 10.0.0.255`.
+   - Click the pencil (edit) icon on the right side of the `default` subnet row. This opens the **Edit subnet** side panel.
+   - Configure the following fields in the panel:
+     - **Name:** Change from `default` to `c2-subnet`.
+     - **IPv4 address range:** This defaults to the parent VNet space `10.0.0.0/16`. Keep it as is.
+     - **Starting address:** `10.0.0.0`.
+     - **Size:** Select `/24 (256 addresses)` from the dropdown. This automatically sets the subnet address range to `10.0.0.0 - 10.0.0.255`.
+     - **Enable private subnet (no default outbound access):** Make sure this is **checked**. This is the March 31, 2026 default security behavior we discussed. It forces the subnet to be private.
+     - **NAT gateway:** Leave as `None` (we will create and link this in Step 3).
+     - **Network security group:** Leave as `None`.
+   - Click **Save** at the bottom of the panel to update the subnet.
 
-   > **Important:** You may see a toggle or checkbox labeled **Private subnet** or **Enable private subnet (no default outbound access)**. This is the new 2026 setting. If it is ON, your VMs will have no outbound internet unless you add a NAT Gateway. We are going to add a NAT Gateway in the next step, so you can leave this setting however it defaults. Do NOT try to turn it off thinking that fixes the problem. The correct fix is always to add a NAT Gateway.
+   > **Note on Private Subnets (March 2026 Change):** By leaving "Enable private subnet" checked, Azure will block all implicit outbound internet access from this subnet. This is why our VMs will not be able to download packages initially. We will explicitly fix this in Step 3 by creating a NAT Gateway and attaching it to this subnet.
 
 5. **Security tab:** Skip, nothing to change here
 6. Click **Review + create**, then **Create**
@@ -150,24 +157,31 @@ Wait for the VNet to deploy. It takes about 30 seconds.
 
 Now we give our subnet outbound internet access. This must be done before the VMs are created, because the Sliver install script needs to download from GitHub.
 
-1. In the search bar, type **NAT gateways** and click it
-2. Click **+ Create**
+1. In the search bar, type **NAT gateways** and click it.
+2. Click **+ Create**.
 3. **Basics tab:**
    - **Resource group:** `c2-infra-rg`
-   - **Name:** `c2-nat-gateway`
-   - **Region:** same region
-   - **Availability zone:** No zone (fine for this use case)
-4. Click **Next: Outbound IP**
+   - **NAT gateway name:** `c2-nat-gateway`
+   - **Region:** Select the same region as your virtual network.
+   - **SKU:** Leave it on the default **Standard V2 (Recommended)** (or select **Standard**).
+   - **Enable NAT64:** Leave unchecked.
+   - **TCP idle timeout (minutes):** `4`.
+4. Click **Next: Outbound IP**.
 5. **Outbound IP tab:**
-   - Under **Public IP addresses**, click **Create a new public IP address**
-   - Name it: `c2-nat-pip`
-   - SKU: **Standard** (this is required, Basic SKU does not work with NAT gateways)
-   - Click **OK**
-6. Click **Next: Subnet**
-7. **Subnet tab:**
-   - Under **Virtual network**, select `c2-vnet`
-   - You will see `c2-subnet` listed. Check the box next to it.
-8. Click **Review + create**, then **Create**
+   - Click **+ Add public IP addresses or prefixes**. This opens the **Manage public IP addresses and prefixes** side panel.
+   - Inside this panel, click the blue **Create a public IP address** link (located right below the dropdown).
+   - In the nested **Add a public IP address** overlay, configure:
+     - **Name:** `c2-nat-pip`.
+     - **IP version:** Select **IPv4**.
+     - **SKU:** This defaults to **StandardV2** and will be greyed out/locked to match your NAT Gateway Basics tab selection.
+     - **Assignment:** Static (locked default).
+   - Click **OK** on the overlay, then click **OK** (or close) on the Manage side panel.
+   - You will now see `c2-nat-pip` added to the **Public IP addresses** table.
+6. Click **Next: Networking**.
+7. **Networking tab:**
+   - Under **Virtual network**, select `c2-vnet` from the dropdown list.
+   - Under **Select specific subnets**, select `c2-subnet` (check the box next to it).
+8. Click **Review + create**, then **Create**.
 
 Deployment takes about 1-2 minutes.
 
@@ -192,13 +206,13 @@ This VM should not be reachable from the internet except for your SSH. The only 
    - **Name:** `c2-server-nsg`
    - **Region:** same region
 4. Click **Review + create**, then **Create**
-5. Once created, go to the NSG resource and click **Inbound security rules** on the left
-6. Click **+ Add** and create this rule:
+5. Once created, go to the NSG resource. In the left menu, find the **Settings** section and click on **Inbound security rules**.
+6. Click **+ Add** (at the top of the rules list) and create this rule:
 
    | Field | Value |
    |-------|-------|
    | Source | IP Addresses |
-   | Source IP addresses | `YOUR_OPERATOR_IP/32` |
+   | Source IP addresses | `YOUR_OPERATOR_IP` |
    | Source port ranges | `*` |
    | Destination | Any |
    | Service | SSH |
@@ -216,36 +230,55 @@ That is the only inbound rule you add now. The NSG already has a default `DenyAl
 
 ### NSG for the Redirector
 
-This VM needs port 443 open to the world (implants connect here), plus your SSH.
+This VM needs port 443 open to the public internet so that implants can connect, plus port 22 open only to your operator IP for SSH configuration.
 
-1. Create another NSG: **Name:** `redirector-nsg`, same Resource Group and Region
-2. Add these inbound rules:
+1. In the search bar, type **Network security groups** and click it.
+2. Click **+ Create**.
+3. Fill in the basics:
+   - **Resource group:** `c2-infra-rg` (select from dropdown)
+   - **Name:** `redirector-nsg`
+   - **Region:** Select the same region as before.
+4. Click **Review + create**, then click **Create**.
+5. Once deployment completes, navigate to the `redirector-nsg` resource.
+6. In the left menu, go to the **Settings** section and click on **Inbound security rules**.
+7. Now add the two rules by clicking **+ Add** at the top of the rules list:
 
-   **Rule 1: SSH from your IP only**
+   **Rule 1: SSH access for you only**
+   This locks down administrative SSH access to your specific operator IP.
 
-   | Field | Value |
-   |-------|-------|
-   | Source | IP Addresses |
-   | Source IP | `YOUR_OPERATOR_IP/32` |
-   | Destination port ranges | `22` |
-   | Protocol | TCP |
-   | Action | Allow |
-   | Priority | `100` |
-   | Name | `Allow-SSH-OperatorOnly` |
+   | Form Field | Value | Explanation |
+   |------------|-------|-------------|
+   | **Source** | `IP Addresses` | We are filtering traffic by a specific IP source. |
+   | **Source IP addresses** | `YOUR_OPERATOR_IP` | Replace this with your exact IP (e.g., `157.50.74.229`). Azure automatically treats a single IP as a `/32` single-host entry. |
+   | **Source port ranges** | `*` | The client port can be any random high port. |
+   | **Destination** | `Any` | Directs to any interface on the VM. |
+   | **Service** | `SSH` | Automatically sets the protocol and port. |
+   | **Destination port ranges** | `22` | The port SSH listens on. |
+   | **Protocol** | `TCP` | SSH runs over TCP. |
+   | **Action** | `Allow` | We want to let this traffic pass. |
+   | **Priority** | `100` | Process this first. |
+   | **Name** | `Allow-SSH-OperatorOnly` | Descriptive name to track the rule. |
 
-   **Rule 2: HTTPS from anywhere (implant traffic)**
+   Click **Add**. Wait for the rule to save.
 
-   | Field | Value |
-   |-------|-------|
-   | Source | Any |
-   | Source port ranges | `*` |
-   | Destination port ranges | `443` |
-   | Protocol | TCP |
-   | Action | Allow |
-   | Priority | `110` |
-   | Name | `Allow-HTTPS-Public` |
+   **Rule 2: HTTPS public access for incoming C2 traffic**
+   This must be open to everyone (`Any`) because we do not know the public IP addresses of the compromised machines beforehand.
 
-Both rules added. The default DenyAllInBound handles everything else.
+   | Form Field | Value | Explanation |
+   |------------|-------|-------------|
+   | **Source** | `Any` | Anyone on the internet can connect. |
+   | **Source port ranges** | `*` | Any source port. |
+   | **Destination** | `Any` | Directs to any interface on the VM. |
+   | **Service** | `Custom` | We will specify port 443 manually. |
+   | **Destination port ranges** | `443` | The standard port for HTTPS/TLS traffic. |
+   | **Protocol** | `TCP` | HTTPS runs over TCP. |
+   | **Action** | `Allow` | Let the traffic pass. |
+   | **Priority** | `110` | Process this after the SSH rule. |
+   | **Name** | `Allow-HTTPS-Public` | Descriptive name. |
+
+   Click **Add** and wait for the rule to save.
+
+Both rules are now active. Any packet trying to hit the redirector VM will be dropped by the default `DenyAllInBound` rule (priority 65500) unless it matches one of these two rules.
 
 ---
 
@@ -291,23 +324,31 @@ Leave defaults. Standard SSD OS disk is fine for this.
 
 ### Networking Tab
 
-This is where most people hit the 2026 UI change. The tab may look different from older guides. Here is what to do:
+Configure the network settings for the VM:
 
-| Field | Value |
-|-------|-------|
-| Virtual network | **c2-vnet** (select from dropdown, it is already there) |
-| Subnet | **c2-subnet** |
-| Public IP | **Create new**, name it `c2-server-pip`, SKU: Standard |
-| NIC network security group | **Advanced** |
-| Configure network security group | Select existing: **c2-server-nsg** |
+1. **Virtual network:** Select `c2-vnet` from the dropdown list.
+2. **Subnet:** Select `c2-subnet`.
+3. **Public IP:** Click **Create new** right below the Public IP field. This opens the **Create public IP address** side overlay.
+   - **Name\*:** `c2-server-pip`.
+   - **SKU:** Defaults to `Standard` (read-only).
+   - **IP version:** `IPv4`.
+   - **IP address assignment:** `Static`.
+   - **Tier:** `Regional`.
+   - **Availability zone\*:** Select any zone available in the dropdown (e.g., `1`, `2`, `3`, or `No zone`).
+   - Click **OK** at the bottom of the overlay to save the public IP settings.
+4. **NIC network security group:** Select **Advanced** (or **Configure**).
+5. **Configure network security group:** Select the existing security group **c2-server-nsg**.
 
 > **2026 UI Note:** If you do not see an "Advanced" option for NSG, look for a "Configure" link or a dropdown that says "Basic". Click on it. In the current portal version, the NSG selector may be under a "Configure" expandable section. If you cannot find it at all, finish creating the VM, then go to the VM's Network Interface resource after creation and assign the NSG there. The NSG can be attached to a NIC at any time, not just during VM creation.
 
 **Public IP:** Yes, the C2 server gets a public IP, but only for your SSH access. We will firewall it so only your operator IP can reach port 22. No other ports are accessible.
 
-### Management Tab
+### Monitoring Tab (or Management Tab in older UI)
 
-Scroll down and find **Boot diagnostics**. Set it to **Enable with managed storage account**. This enables Azure Serial Console, which is your backup access method if you ever lock yourself out of SSH.
+Click on the **Monitoring** tab at the top. Scroll down to find **Boot diagnostics**:
+- In the new Azure portal interface, Boot Diagnostics is enabled by default with a managed storage account.
+- Ensure **Boot diagnostics** is set to **Enable with managed storage account** (or **Enabled**). 
+- This is what enables the **Azure Serial Console**, giving you a backup browser-based terminal if you ever accidentally lock yourself out of SSH via UFW or NSG misconfiguration.
 
 ### Review + Create
 
@@ -335,14 +376,15 @@ Same process. Create a second VM.
 
 Networking Tab:
 
-| Field | Value |
-|-------|-------|
-| Virtual network | **c2-vnet** |
-| Subnet | **c2-subnet** |
-| Public IP | **Create new**, name `redirector-pip`, SKU: Standard |
-| NIC network security group | **Advanced** -> select **redirector-nsg** |
+1. **Virtual network:** Select `c2-vnet`.
+2. **Subnet:** Select `c2-subnet`.
+3. **Public IP:** Click **Create new**:
+   - **Name\*:** `redirector-pip`.
+   - **Availability zone\*:** Select any zone (e.g., `1`, `2`, `3`, or `No zone`).
+   - Click **OK**.
+4. **NIC network security group:** Select **Advanced** (or **Configure**) -> select `redirector-nsg`.
 
-Boot diagnostics: enable it (same as C2 server).
+Monitoring Tab: Ensure Boot diagnostics is enabled (same as C2 server).
 
 Click **Review + create**, then **Create**.
 

