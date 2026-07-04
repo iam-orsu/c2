@@ -54,12 +54,14 @@ curl -s https://ifconfig.me
    * **Name**: `c2-vnet`
    * **Region**: `East US`
 4. Go to **Address space** tab:
-   * VNet Address Space: `10.0.0.0/16`
-   * In **Subnets** list, edit default subnet:
-     * **Name**: `c2-subnet`
+   * Azure automatically populates the IPv4 address space `10.0.0.0/16` and a default subnet `default` (`10.0.0.0/24`).
+   * In the **Subnets** box, click the pencil/edit icon ✏️ (or click `default`) to open the **Edit subnet** side panel on the right.
+   * Inside **Edit subnet** side panel:
+     * **Name**: `default` (or `c2-subnet`)
      * **Starting address**: `10.0.0.0`, **Size**: `/24 (256 addresses)`
-     * **Enable private subnet (no default outbound access)**: Check this box (March 2026 default).
-   * Click **Save** -> **Review + create** -> **Create**.
+     * Under **Private subnet**, check **Enable private subnet (no default outbound access)**.
+     * Click **Save** at the bottom of the side panel.
+   * Click **Review + create** -> **Create**.
 
 ---
 

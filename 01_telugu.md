@@ -75,23 +75,27 @@ create cheyaboye vms, firewalls rules anni indhulo store ayyi untai
 so its easy to manage all together at one place
 
 ### 2. Create Virtual Network
-* Now oka virtual network create cheddam. Search bar lo **Virtual networks** -> **+ Create**.
-* Resource Group lo previous ga create chesina group untadhi: `c2-infra-rg`
-*lets Name it: `c2-vnet`
-* Address space: `10.0.0.0/16`
-* Subnets section lo default subnet edit chesi:
-  * Name: `c2-subnet` (or default)
-  * Range: `10.0.0.0/24`
-  * and check **Enable private subnet (no default outbound access)**.
-
-ikada oka chinna twist undhi! 
+* Search bar lo **Virtual networks** -> **+ Create**.
+* **Basics tab** lo:
+  * Resource Group: `c2-infra-rg`
+  * Name: `c2-vnet`
+  * Region: `India` (or mee choice)
+* **Address space tab** lo:
+  * Azure by default IPv4 address range `10.0.0.0/16` and `default` subnet auto-populate chesthundhi.
+  * Subnets box lo `default` row pakkana ఉన్న pencil icon ✏️ (Edit) click chesthe right side **Edit subnet** panel open avthundhi.
+  * **Edit subnet** side panel lo:
+    * Name: `default` (or `c2-subnet`)
+    * Starting address: `10.0.0.0`, Size: `/24 (256 addresses)`
+    * Private subnet section lo check **Enable private subnet (no default outbound access)**.
+    * Click **Save** at the bottom of the panel.
+* Click **Review + create** -> **Create**. 
 
 azure lo from march 2026 nundi kothaga create chese subnets default ga private ga untai anamata.
 ante outbound internet access undadhu.
 
 so vms create chesaka meeru `apt update` chesina or tools install chesina
 hang aypothadhi!
-andhukani next step lo NAT gateway setup chestham.
+andhukani next step lo NAT gateway setup chestham for giving internet access.
 
 ---
 
